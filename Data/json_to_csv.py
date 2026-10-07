@@ -11,7 +11,7 @@ records = data["books"]
 attributes = records[0].keys()
 
 # creating the CSV
-with open("books.csv", "w", nealine="", encoding="utf-8") as file:
+with open("books.csv", "w", newline="", encoding="utf-8") as file:
     # adding the attributes
     writer = csv.DictWriter(file, fieldnames=attributes)
     writer.writeheader()
