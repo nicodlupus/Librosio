@@ -1,37 +1,78 @@
 {
     "books": [
-
         {
             "id": 1,
-            "read": 1,
+            "status": "read",
             "title": "Η τέχνη των Στωικών",
             "subtitle": "Ένας διαφωτιστικός οδηγός για τον ρόλο του στωικισμού στη σύγχρονη ζωή",
             "description": "Presenting philosophy as an art concerned with one's way of life, Sellars draws on Socratic and Stoic philosophical resources and argues for the ancient claim that philosophy is primarily expressed in one's behaviour. The book considers the relationship between philosophy and biography, and the bearing that this relationship has on debates concerning the nature and function of philosophy. Questioning the premise that philosophy can only be conceived as a rational discourse, Sellars presents it instead as an art (techne) that combines both 'logos' (rational discourse) and 'askesis' (training), and suggests that this will make it possible to understand better the relationship between philosophy and biography. The first part of this book outlines the Socratic conception of philosophy as an art and the Stoic development of this idea into an art of living, as well as considering some of the ancient objections to the Stoic conception. Part Two goes on to examine the relationship between philosophical discourse and exercises in Stoic philosophy. Taking the literary form of such exercises as central, the author analyses two texts devoted to philosophical exercises by Epictetus and Marcus Aurelius",
             "author": "John Sellars",
-            "authors_mentioned": "Marcus Aurelius, Epictitus, Seneca",
+            "authors_mentioned": [
+                "Marcus Aurelius",
+                "Epictetus",
+                "Seneca"
+            ],
             "house": "Διόπτρα",
             "type": "Non-Fiction",
             "key_genre": "Philosophy",
-            "genre": "Philosphy",
-            "lang": "greek",
+            "genre": "Philosophy",
+            "themes": [
+                "stoicism",
+                "philosophy as a way of life",
+                "ethics",
+                "self-discipline"
+            ],
+            "tone": [
+                "reflective",
+                "analytical"
+            ],
+            "complexity": 4,
+            "pages": null,
+            "year_published": 2003,
+            "lang": "el",
+            "original_language": "en",
+            "series": null,
+            "series_number": null,
+            "date_finished": null,
+            "approximate_time_to_read_in_days": 3,
             "user_rate": 5,
-            "would_read_again": 1
+            "would_read_again": 1,
+            "notes": null
         },
         {
             "id": 2,
-            "read": 0,
-            "title": "Assasinio sull'Orient Express",
-            "subtitle": "NaN",
+            "status": "to_read",
+            "title": "Assassinio sull'Orient Express",
+            "subtitle": null,
             "description": "A group of passengers trapped on the Orient Express in a snow storm with a murdered body and a Belgian detective to keep them company: Murder on the Orient Express is one of Agatha Christie’s most famous stories. It's an intricate mystery revolving around a group of characters cut off from the world where Poirot exhibits not only the power of his little grey cells but his concern and compassion for humanity. The underlying plot of the story was one Agatha Christie pulled from the headlines at the time, the abduction of Charles Lindbergh’s son, a traumatic real-life mystery involving murder and extortion that had yet to be solved when Murder on the Orient Express was published. As for the setting, Christie had long professed a love of the Orient Express, finally achieving her dream of travelling on it in 1928 with her first solo trip abroad. In writing the story, she painstakingly noted the details of the carriages; clues such as the position of door handles would prove vital to Poirot’s investigation. Several fans, in fact, have followed in Christie’s footsteps, double-checking her descriptions.",
             "author": "Agatha Christie",
-            "authors_mentioned": "NaN",
+            "authors_mentioned": null,
             "house": "Mondadori",
             "type": "Fiction",
             "key_genre": "Novel",
             "genre": "Crime",
-            "lang": "italian",
-            "user_rate": 5,
-            "would_read_again": 0
+            "themes": [
+                "murder mystery",
+                "justice",
+                "closed-circle setting",
+                "train travel"
+            ],
+            "tone": [
+                "suspenseful",
+                "classic"
+            ],
+            "complexity": 2,
+            "pages": null,
+            "year_published": 1934,
+            "lang": "it",
+            "original_language": "en",
+            "series": "Hercule Poirot",
+            "series_number": 10,
+            "date_finished": null,
+            "approximate_time_to_read_in_days": null,
+            "user_rate": null,
+            "would_read_again": null,
+            "notes": null
         }
     ]
 }
