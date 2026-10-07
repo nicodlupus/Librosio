@@ -11,15 +11,27 @@
             "authors_mentioned": "Marcus Aurelius, Epictitus, Seneca",
             "house": "Διόπτρα",
             "type": "Non-Fiction",
+            "key_genre": "Philosophy",
             "genre": "Philosphy",
             "lang": "greek",
             "user_rate": 5,
-            "user_opinion": "This book mentions needed lessons for having a peaceful life"
+            "would_read_again": 1
         },
         {
             "id": 2,
             "read": 0,
-            
+            "title": "Assasinio sull'Orient Express",
+            "subtitle": "NaN",
+            "description": "A group of passengers trapped on the Orient Express in a snow storm with a murdered body and a Belgian detective to keep them company: Murder on the Orient Express is one of Agatha Christie’s most famous stories. It's an intricate mystery revolving around a group of characters cut off from the world where Poirot exhibits not only the power of his little grey cells but his concern and compassion for humanity. The underlying plot of the story was one Agatha Christie pulled from the headlines at the time, the abduction of Charles Lindbergh’s son, a traumatic real-life mystery involving murder and extortion that had yet to be solved when Murder on the Orient Express was published. As for the setting, Christie had long professed a love of the Orient Express, finally achieving her dream of travelling on it in 1928 with her first solo trip abroad. In writing the story, she painstakingly noted the details of the carriages; clues such as the position of door handles would prove vital to Poirot’s investigation. Several fans, in fact, have followed in Christie’s footsteps, double-checking her descriptions.",
+            "author": "Agatha Christie",
+            "authors_mentioned": "NaN",
+            "house": "Mondadori",
+            "type": "Fiction",
+            "key_genre": "Novel",
+            "genre": "Crime",
+            "lang": "italian",
+            "user_rate": 5,
+            "would_read_again": 0
         }
     ]
 }
