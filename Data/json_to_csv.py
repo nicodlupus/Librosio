@@ -7,7 +7,8 @@ with open("books.json", "r", encoding="utf-8") as file:
     data = json.load(file)
     
 # retrieving the attribute names from the first object
-attributes = data[0].keys()
+records = data["books"]
+attributes = records[0].keys()
 
 # creating the CSV
 with open("books.csv", "w", nealine="", encoding="utf-8") as file:
@@ -15,6 +16,6 @@ with open("books.csv", "w", nealine="", encoding="utf-8") as file:
     writer = csv.DictWriter(file, fieldnames=attributes)
     writer.writeheader()
     # adding the data to the csv
-    writer.writerows(data)
+    writer.writerows(records)
     
 print("CSV created successfully.")
