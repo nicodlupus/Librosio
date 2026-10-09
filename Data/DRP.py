@@ -1,16 +1,12 @@
 """
-This is a pipeline for retrieving data of the rest of the books using the OpenLibrary
+Adds books to books.csv.
 
-Steps (one book per round):
-1. ask for the title
-2. clean the text (and find the original title when it is Greek/Italian/etc.)
-3. find the data that needs no answers from us (OpenLibrary)
-4. ask the user for what only the user knows (reading info, rating, notes...)
-5. ask the model for the descriptive attributes (themes, tone, complexity...)
-6. append the new row to books.csv
-7. print the new row to check it
+You type the title and the author. Everything else is found automatically with whatever works
+at that moment (the Ollama model, and OpenLibrary for the description when it is reachable).
+The only things you answer are: status, approximate_time_to_read_in_days, times_read,
+user_rate, would_read_again and notes.
 
-Usage: python3 DRP.py [path/to/books.csv]
+Usage: python3 DRP.py [path/to/books.csv]      (empty title = stop)
 """
 import csv
 import json
@@ -22,42 +18,38 @@ from pathlib import Path
 
 import requests
 
-CSV_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("books.csv")
+HERE = Path(__file__).parent
+CSV_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "books.csv"
+OLLAMA_URL = "https://ollama.com/api/chat"
+MODEL = "gpt-oss:120b"      # can be changed with OLLAMA_MODEL in the .env
 OL_SEARCH = "https://openlibrary.org/search.json"
 OL_BASE = "https://openlibrary.org"
 OL_HEADERS = {"User-Agent": "Librosio/1.0 (personal book recommender)"}
-OL_FIELDS = "key,title,subtitle,author_name,first_publish_year,number_of_pages_median,subject"
-OLLAMA_URL = "https://ollama.com/api/chat"
-MODEL = "gpt-oss:120b"      # can be changed with OLLAMA_MODEL in the .env
-
+OLLAMA_SEARCH_URL = "https://ollama.com/api/web_search"
+FALLBACK_MODELS = ["deepseek-v4-pro:0813", "kimi-k3"]     # tried when the first model does not know the book
 TYPES = ["Fiction", "Non-Fiction"]
-AI_FIELDS = ["type", "form", "genre", "themes", "tone", "complexity",
-             "authors_mentioned", "series", "series_number", "year_published"]
-LIST_FIELDS = {"themes", "tone", "authors_mentioned"}
+LIST_FIELDS = ("themes", "tone", "authors_mentioned")
 
 
-# ---------- step 2: text management ----------
+def load_env():
+    # reads KEY=value lines of the .env (repo root or Data/) without extra libraries
+    for folder in (HERE.parent, HERE):
+        path = folder / ".env"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.lstrip().startswith("#"):
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
 
 def normalize(text):
-    # lowercase, no accents, no punctuation, single spaces (used to compare titles)
+    # lowercase, no accents, no punctuation, single spaces (used to compare titles and authors)
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
-    text = re.sub(r"[^\w\s]", " ", text.casefold())
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.casefold())).strip()
 
 
-def clean_description(desc):
-    # OpenLibrary descriptions are either a string or {"type":..., "value":...}
-    if isinstance(desc, dict):
-        desc = desc.get("value")
-    if not desc:
-        return None
-    desc = desc.split("----------")[0]          # drops the "Source / Contributors" footer
-    desc = re.sub(r"\(\[source\]\[\d+\]\)", "", desc)
-    return re.sub(r"[ \t]+", " ", desc).strip() or None
-
-
-# ---------- small input helpers ----------
+# ---------- input helpers ----------
 
 def ask(prompt, default=None, required=False):
     suffix = f" [{default}]" if default not in (None, "") else ""
@@ -77,181 +69,48 @@ def ask_int(prompt, lo, hi, default=None, required=False):
         value = ask(prompt, default, required)
         if value is None:
             return None
-        if value.lstrip("-").isdigit() and lo <= int(value) <= hi:
+        if value.isdigit() and lo <= int(value) <= hi:
             return int(value)
         print(f"  type a whole number between {lo} and {hi}")
 
 
-def ask_date(prompt):
-    while True:
-        value = ask(f"{prompt} (YYYY-MM-DD, Enter to skip)")
-        if value is None or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-            return value
-        print("  use the format YYYY-MM-DD")
-
-
-def ask_yes_no(prompt, default="y"):
-    return (ask(f"{prompt} (y/n)", default) or default).lower().startswith("y")
-
-
-def read_multiline():
-    # reads pasted text until an empty line
-    lines = []
-    while True:
-        line = input()
-        if not line.strip():
-            return "\n".join(lines)
-        lines.append(line)
-
-
-# ---------- .env ----------
-
-def load_env():
-    # reads KEY=value lines of the .env (repo root or Data/) without extra libraries
-    for folder in (Path(__file__).parent.parent, Path(__file__).parent):
-        path = folder / ".env"
-        if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if "=" in line and not line.lstrip().startswith("#"):
-                    key, value = line.split("=", 1)
-                    os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-
-
-# ---------- LLM (Ollama) ----------
-
-def ask_llm(prompt, what):
-    """Returns a dict. Uses Ollama if the API_KEY works, otherwise the user pastes the model's reply."""
-    text = None
-    api_key = os.environ.get("API_KEY")
-    if api_key:
-        try:
-            r = requests.post(
-                OLLAMA_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": os.environ.get("OLLAMA_MODEL", MODEL), "stream": False, "format": "json",
-                      "messages": [{"role": "user", "content": prompt}]},
-                timeout=180,
-            )
-            r.raise_for_status()
-            text = r.json()["message"]["content"]
-        except (requests.RequestException, KeyError, ValueError) as error:
-            print(f"  (Ollama not used for '{what}': {type(error).__name__})")
+def ask_user_fields():
+    """The only questions: status, days, times_read, user_rate, would_read_again, notes."""
+    out = {"status": ask("Status (read / to_read)", "read").lower()}
+    while out["status"] not in ("read", "to_read"):
+        out["status"] = ask("Status must be read or to_read", "read").lower()
+    if out["status"] == "read":
+        out["approximate_time_to_read_in_days"] = ask_int("Approximate days to read", 1, 1000)
+        out["times_read"] = ask_int("Times read", 1, 100, default=1)
+        out["user_rate"] = ask_int("Your rating (1-5)", 1, 5, required=True)
+        out["would_read_again"] = ask_int("Would read again (1 yes / 0 no)", 0, 1, required=True)
     else:
-        print("  (no API_KEY found in .env)")
-    if not text:
-        print("\nPaste this to an AI, then paste its JSON reply here and finish with an empty line:\n")
-        print("-" * 60 + f"\n{prompt}\n" + "-" * 60)
-        text = read_multiline()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+        out["times_read"] = 0
+    out["notes"] = ask("Notes (Enter to skip)")
+    return out
 
 
-def identify_book(title):
-    # Greek/Italian/... titles are not in OpenLibrary, so the model finds the original title
+# ---------- finding the data ----------
+
+def ask_model(title, author, examples, model=None, web=None):
+    """Descriptive attributes from an Ollama model. Returns a dict or None."""
+    model = model or os.environ.get("OLLAMA_MODEL", MODEL)
+    context = ""
+    if web:
+        context = ("\nWeb search results (some may be about other books). If they clearly identify the book "
+                   "below, even with typos in the title or author, or the title being a translation, use them "
+                   "and answer known=true:\n" + "\n".join(
+                       f"- {w.get('title', '')}: {w.get('content', '')[:500]}" for w in web[:6]) + "\n")
     prompt = (
-        f'Identify the book with the title "{title}" (the title may be a Greek, Italian or other '
-        "translation). Reply ONLY with JSON: "
-        '{"original_title": "...", "author": "..."}. Use null for anything you are not sure about.'
-    )
-    return ask_llm(prompt, "identify the book") or {}
-
-
-# ---------- step 3: OpenLibrary ----------
-
-def search_openlibrary(title, author=None):
-    params = {"title": title, "limit": 5, "fields": OL_FIELDS}
-    if author:
-        params["author"] = author
-    try:
-        r = requests.get(OL_SEARCH, params=params, headers=OL_HEADERS, timeout=20)
-        r.raise_for_status()
-        return r.json().get("docs", [])
-    except requests.RequestException as error:
-        print(f"  OpenLibrary error: {error}")
-        return []
-
-
-def get_work(key):
-    try:
-        r = requests.get(f"{OL_BASE}{key}.json", headers=OL_HEADERS, timeout=20)
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException:
-        return {}
-
-
-def pick_candidate(docs):
-    for i, d in enumerate(docs, 1):
-        authors = ", ".join(d.get("author_name", [])[:2]) or "unknown author"
-        print(f"  {i}) {d.get('title')} - {authors} ({d.get('first_publish_year', '?')})")
-    print("  0) none of these")
-    choice = ask_int("Which one", 0, len(docs), default=1)
-    return docs[choice - 1] if choice else None
-
-
-def find_book(title):
-    """Returns (doc, work) of the chosen OpenLibrary result, or (None, {})."""
-    query, author = title, None
-    if not title.isascii():                       # OpenLibrary has no Greek titles
-        info = identify_book(title)
-        query, author = info.get("original_title") or title, info.get("author")
-        print(f"  looking for: {query}" + (f" - {author}" if author else ""))
-    docs = search_openlibrary(query, author)
-    if not docs and title.isascii():
-        info = identify_book(title)
-        query, author = info.get("original_title") or title, info.get("author")
-        print(f"  looking for: {query}" + (f" - {author}" if author else ""))
-        docs = search_openlibrary(query, author)
-    while not docs:
-        query = ask("Nothing found. Type the original/English title (Enter to continue without OpenLibrary)")
-        if not query:
-            return None, {}
-        docs = search_openlibrary(query)
-    doc = pick_candidate(docs)
-    return (doc, get_work(doc["key"])) if doc else (None, {})
-
-
-# ---------- step 4: answers from the user ----------
-
-def ask_user_fields(found):
-    row = {}
-    row["status"] = ask("Status (read / to_read)", "read", required=True).lower()
-    while row["status"] not in ("read", "to_read"):
-        row["status"] = ask("Status must be read or to_read", "read").lower()
-    row["house"] = ask("Publishing house (of your edition)")
-    row["pages"] = found.get("pages")             # not asked, taken from OpenLibrary as is
-    if row["status"] == "read":
-        row["times_read"] = ask_int("Times read", 1, 100, default=1)
-        row["approximate_time_to_read_in_days"] = ask_int("Approximate days to read", 1, 1000)
-        row["date_started"] = ask_date("Date started")
-        row["date_finished"] = ask_date("Date finished")
-        row["user_rate"] = ask_int("Your rating", 1, 5, required=True)
-        row["would_read_again"] = ask_int("Would read again (1 yes / 0 no)", 0, 1, required=True)
-    else:
-        row["times_read"] = 0
-    row["notes"] = ask("Notes (Enter to skip)")
-    return row
-
-
-# ---------- step 5: answers from the model ----------
-
-def examples_from_csv(rows):
-    keys = ["type", "form", "genre", "themes", "tone", "complexity"]
-    return "\n".join(", ".join(f"{k}={r[k]}" for k in keys) for r in rows[-3:])
-
-
-def llm_fields(found, rows):
-    prompt = (
-        "You are filling the descriptive attributes of a book for a personal book recommender.\n"
-        f"Title: {found['search_title']}\nAuthor: {found.get('author')}\n"
-        f"OpenLibrary year: {found.get('year_published')}\nOpenLibrary subjects: {found.get('subjects')}\n"
-        f"Description: {found.get('description')}\n\n"
+        "You fill the descriptive attributes of a book for a personal book recommender.\n"
+        f'Title: "{title}" (it may be a Greek or Italian translation of the title, or have typos)\n'
+        f"Author: {author} (it may have typos)\n{context}\n"
         "Reply ONLY with JSON having exactly these keys:\n"
+        '  "known": true only if you are confident you know this exact book, otherwise false '
+        "(then set every other key to null; never invent a book)\n"
+        '  "author": the full correct author name\n'
+        '  "original_title": the title in the original language\n'
+        '  "description": 2-3 neutral sentences about the book, in English, no spoilers\n'
         '  "type": "Fiction" or "Non-Fiction"\n'
         '  "form": one of Novel, Short stories, Essay, Treatise, Memoir, Biography, Poetry, Play, Guide\n'
         '  "genre": one genre, e.g. Thriller, Crime, Philosophy\n'
@@ -259,110 +118,160 @@ def llm_fields(found, rows):
         '  "tone": 1-3 words (list of strings)\n'
         '  "complexity": integer 1 (easy) to 5 (very demanding)\n'
         '  "authors_mentioned": list of authors the book discusses, or null\n'
-        '  "series": series name or null, "series_number": integer or null\n'
+        '  "series": name of the story/book series the book belongs to (like Hercule Poirot or Robert Langdon), '
+        "NOT a publisher's collection; null if it is a standalone book. \"series_number\": integer or null\n"
         '  "year_published": year of the FIRST publication of the original book (integer)\n\n'
-        f"Keep the same style as these existing rows:\n{examples_from_csv(rows)}"
+        f"Keep the same style as these existing rows:\n{examples}"
     )
-    data = ask_llm(prompt, "describe the book") or {}
-    out = {}
-    out["type"] = data.get("type") if data.get("type") in TYPES else None
-    out["form"] = data.get("form")
-    out["genre"] = data.get("genre")
-    for key in ("themes", "tone", "authors_mentioned"):
-        value = data.get(key)
-        out[key] = [str(v) for v in value] if isinstance(value, list) and value else None
-    c = data.get("complexity")
-    out["complexity"] = c if isinstance(c, int) and 1 <= c <= 5 else None
-    out["series"] = data.get("series")
-    n = data.get("series_number")
-    out["series_number"] = n if isinstance(n, int) else None
-    y = data.get("year_published")
-    out["year_published"] = y if isinstance(y, int) else found.get("year_published")
-    if found.get("year_published") and out["year_published"] != found["year_published"]:
-        print(f"  note: OpenLibrary says {found['year_published']}, the model says {out['year_published']} (using the model's)")
-    return out
+    body = {"model": model, "stream": False, "format": "json", "messages": [{"role": "user", "content": prompt}]}
+    if model.startswith("gpt-oss"):
+        body["think"] = "low"                     # much faster, and enough for this
+    for _ in range(2):
+        try:
+            r = requests.post(OLLAMA_URL, headers={"Authorization": f"Bearer {os.environ['API_KEY']}"},
+                              json=body, timeout=90)
+            r.raise_for_status()
+            return json.loads(re.search(r"\{.*\}", r.json()["message"]["content"], re.DOTALL).group(0))
+        except (requests.RequestException, KeyError, ValueError, AttributeError):
+            continue
+    return None
 
 
-def review_llm_fields(fields):
-    print("\nThe model suggests:")
-    for k in AI_FIELDS:
-        print(f"  {k}: {fields[k]}")
-    if ask_yes_no("Accept", "y"):
-        return fields
-    for k in AI_FIELDS:
-        current = ", ".join(fields[k]) if k in LIST_FIELDS and fields[k] else fields[k]
-        value = ask(f"{k}", current)
-        if value is None:
-            fields[k] = None
-        elif k in LIST_FIELDS:
-            fields[k] = [v.strip() for v in value.split(",") if v.strip()]
-        elif k in ("complexity", "series_number", "year_published"):
-            fields[k] = int(value) if value.isdigit() else fields[k]
-        else:
-            fields[k] = value
-    return fields
+def web_search(query):
+    """Web search through the Ollama API (same API_KEY). Returns a list of results or []."""
+    try:
+        r = requests.post(OLLAMA_SEARCH_URL, headers={"Authorization": f"Bearer {os.environ['API_KEY']}"},
+                          json={"query": query, "max_results": 4}, timeout=30)
+        r.raise_for_status()
+        return r.json().get("results", [])
+    except (requests.RequestException, KeyError, ValueError):
+        return []
 
 
-# ---------- steps 6 and 7: csv ----------
-
-def to_csv_value(value):
-    # same format json_to_csv.py produces: None -> empty, lists -> python list text
-    return "" if value is None else value
+def recognised(answer):
+    return bool(answer) and answer.get("known") is True
 
 
-def next_id(rows):
-    return max((int(r["id"]) for r in rows if r["id"].isdigit()), default=0) + 1
-
-
-def run_once(header, rows):
-    # step 1
-    title = ask("\nBook title", required=True)
-    if normalize(title) in {normalize(r["title"]) for r in rows}:
-        if not ask_yes_no(f"'{title}' is already in the csv. Continue anyway", "n"):
-            return None
-    # steps 2 and 3
-    doc, work = find_book(title)
-    found = {"search_title": doc["title"] if doc else title}
-    if doc:
-        found.update(
-            author=(doc.get("author_name") or [None])[0],
-            subtitle=doc.get("subtitle"),
-            year_published=doc.get("first_publish_year"),
-            pages=doc.get("number_of_pages_median"),
-            subjects=(doc.get("subject") or [])[:15],
-            description=clean_description(work.get("description")),
-        )
-        print(f"  found: {found['search_title']} - {found['author']}, {found['year_published']}, {found['pages']} pages")
+def try_ways(title, author, examples):
+    """Tries the ways one by one, telling the user. Returns (answer, source) or (None, None)."""
+    answer = ask_model(title, author, examples)
+    if recognised(answer):
+        return answer, "model"
+    print("  the model did not recognise the book, searching the web...")
+    web = web_search(f"{title} {author} βιβλίο") + web_search(f"{author} book")
+    if web:
+        answer = ask_model(title, author, examples, web=web)
+        if recognised(answer):
+            return answer, "web search + model"
     else:
-        found["author"] = ask("Author", required=True)
-    # step 4
-    user = ask_user_fields(found)
-    # step 5
-    ai = review_llm_fields(llm_fields(found, rows))
-    # step 6
+        print("  (the web search gave nothing)")
+    for other in FALLBACK_MODELS:
+        print(f"  still not found, trying another model ({other})...")
+        answer = ask_model(title, author, examples, model=other, web=web)
+        if recognised(answer):
+            return answer, other
+    return None, None
+
+
+def find_info(title, author, examples):
+    """Returns (known, ai, original_title, author, sources). Asks the user for help as a last way."""
+    while True:
+        answer, source = try_ways(title, author, examples)
+        if answer:
+            known, ai = clean_model(answer)
+            return known, ai, answer.get("original_title"), answer.get("author") or author, [source]
+        print("  COULD NOT FIND this book automatically.")
+        title = ask("Type the English/original title or fix the spelling (Enter to save it without data)")
+        if not title:
+            return False, {}, None, author, []
+        author = ask("Author", author)
+
+
+def clean_model(data):
+    known = data.get("known") is True
+    out = {}
+    for key in ("description", "form", "genre", "series"):
+        out[key] = data.get(key) if known else None
+    out["type"] = data.get("type") if known and data.get("type") in TYPES else None
+    for key in LIST_FIELDS:
+        value = data.get(key)
+        out[key] = [str(v) for v in value] if known and isinstance(value, list) and value else None
+    for key, low, high in (("complexity", 1, 5), ("series_number", 0, 1000), ("year_published", 0, 3000)):
+        value = data.get(key)
+        out[key] = value if known and isinstance(value, int) and low <= value <= high else None
+    return known, out
+
+
+def openlibrary_extra(title, author):
+    """Best effort and quick: the real description and pages from OpenLibrary, or {} if it is down."""
+    try:
+        r = requests.get(OL_SEARCH, headers=OL_HEADERS, timeout=8, params={
+            "title": title, "author": author, "limit": 3, "fields": "key,author_name,number_of_pages_median"})
+        r.raise_for_status()
+        wanted = normalize(author)
+        for doc in r.json().get("docs", []):
+            if any(wanted in normalize(a) or normalize(a) in wanted for a in doc.get("author_name", [])):
+                work = requests.get(f"{OL_BASE}{doc['key']}.json", headers=OL_HEADERS, timeout=8).json()
+                desc = work.get("description")
+                desc = desc.get("value") if isinstance(desc, dict) else desc
+                desc = re.sub(r"\(\[source\]\[\d+\]\)", "", (desc or "").split("----------")[0]).strip()
+                return {"description": desc or None, "pages": doc.get("number_of_pages_median")}
+    except (requests.RequestException, ValueError):
+        pass
+    return {}
+
+
+# ---------- main ----------
+
+def add_book(header, rows):
+    title = ask("\nBook title (Enter to stop)")
+    if not title:
+        return False
+    author = ask("Author", required=True)
+    if normalize(title) in {normalize(r["title"]) for r in rows}:
+        if (ask(f"'{title}' is already in the csv. Add anyway (y/n)", "n") or "n").lower() != "y":
+            return True
+    user = ask_user_fields()
+
+    print("  looking for the book data...")
+    examples = "\n".join(
+        ", ".join(f"{k}={r[k]}" for k in ("type", "form", "genre", "themes", "tone", "complexity"))
+        for r in rows[-3:])
+    known, ai, original, author, sources = find_info(title, author, examples)
+    extra = openlibrary_extra(original or title, author) if known else {}
+    if extra.get("description"):
+        ai["description"] = extra["description"]
+        sources.append("OpenLibrary description")
+    print(f"  data from: {', '.join(sources) or 'nothing found'}")
+    if not known:
+        print("  the row is saved with the descriptive fields empty, fill them by hand")
+
     row = {k: "" for k in header}
-    row.update(id=next_id(rows), title=title, subtitle=found.get("subtitle"),
-               description=found.get("description"), author=found["author"], **user, **ai)
-    row = {k: to_csv_value(row.get(k)) for k in header}
+    row.update(ai)
+    row.update(user)
+    row.update(id=max((int(r["id"]) for r in rows if r["id"].isdigit()), default=0) + 1,
+               title=title, author=author, pages=extra.get("pages"))
+    row = {k: "" if v is None else v for k, v in row.items()}
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as file:
         csv.DictWriter(file, fieldnames=header).writerow(row)
-    # step 7
-    print("\nNew row added to", CSV_PATH.name)
+
+    print(f"\nRow added to {CSV_PATH.name}:")
     for k, v in row.items():
         text = str(v)
         print(f"  {k}: {text[:100] + '...' if len(text) > 100 else text}")
-    return row
+    return True
 
 
 def main():
     load_env()
+    if not os.environ.get("API_KEY"):
+        print("No API_KEY found in the .env: the model cannot be used, only OpenLibrary")
     try:
         while True:
             with open(CSV_PATH, encoding="utf-8", newline="") as file:
                 reader = csv.DictReader(file)
                 header, rows = reader.fieldnames, list(reader)
-            run_once(header, rows)
-            if not ask_yes_no("\nAdd another book", "y"):
+            if not add_book(header, rows):
                 break
     except (KeyboardInterrupt, EOFError):
         print("\nStopped.")
