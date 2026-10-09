@@ -6,7 +6,7 @@ Steps (one book per round):
 2. clean the text (and find the original title when it is Greek/Italian/etc.)
 3. find the data that needs no answers from us (OpenLibrary)
 4. ask the user for what only the user knows (reading info, rating, notes...)
-5. ask Claude for the descriptive attributes (themes, tone, complexity...)
+5. ask the model for the descriptive attributes (themes, tone, complexity...)
 6. append the new row to books.csv
 7. print the new row to check it
 
@@ -14,6 +14,7 @@ Usage: python3 DRP.py [path/to/books.csv]
 """
 import csv
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -26,7 +27,8 @@ OL_SEARCH = "https://openlibrary.org/search.json"
 OL_BASE = "https://openlibrary.org"
 OL_HEADERS = {"User-Agent": "Librosio/1.0 (personal book recommender)"}
 OL_FIELDS = "key,title,subtitle,author_name,first_publish_year,number_of_pages_median,subject"
-MODEL = "claude-opus-5-5"
+OLLAMA_URL = "https://ollama.com/api/chat"
+MODEL = "gpt-oss:120b"      # can be changed with OLLAMA_MODEL in the .env
 
 TYPES = ["Fiction", "Non-Fiction"]
 AI_FIELDS = ["type", "form", "genre", "themes", "tone", "complexity",
@@ -102,28 +104,42 @@ def read_multiline():
         lines.append(line)
 
 
-# ---------- Claude ----------
+# ---------- .env ----------
 
-def ask_claude(prompt, what):
-    """Returns a dict. Uses the API if it is available, otherwise the user pastes Claude's reply."""
+def load_env():
+    # reads KEY=value lines of the .env (repo root or Data/) without extra libraries
+    for folder in (Path(__file__).parent.parent, Path(__file__).parent):
+        path = folder / ".env"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.lstrip().startswith("#"):
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+# ---------- LLM (Ollama) ----------
+
+def ask_llm(prompt, what):
+    """Returns a dict. Uses Ollama if the API_KEY works, otherwise the user pastes the model's reply."""
     text = None
-    try:
-        import anthropic
-        client = anthropic.Anthropic()
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=4000,
-            output_config={"effort": "low"},
-            messages=[{"role": "user", "content": prompt}],
-        )
-        if response.stop_reason == "refusal":
-            print(f"  Claude declined to answer ({what})")
-        else:
-            text = "".join(b.text for b in response.content if b.type == "text")
-    except Exception as error:
-        print(f"  (Claude API not used: {type(error).__name__}) ")
-    if text is None:
-        print(f"\nPaste this to Claude, then paste its JSON reply here and finish with an empty line:\n")
+    api_key = os.environ.get("API_KEY")
+    if api_key:
+        try:
+            r = requests.post(
+                OLLAMA_URL,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": os.environ.get("OLLAMA_MODEL", MODEL), "stream": False, "format": "json",
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=180,
+            )
+            r.raise_for_status()
+            text = r.json()["message"]["content"]
+        except (requests.RequestException, KeyError, ValueError) as error:
+            print(f"  (Ollama not used for '{what}': {type(error).__name__})")
+    else:
+        print("  (no API_KEY found in .env)")
+    if not text:
+        print("\nPaste this to an AI, then paste its JSON reply here and finish with an empty line:\n")
         print("-" * 60 + f"\n{prompt}\n" + "-" * 60)
         text = read_multiline()
     match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -136,13 +152,13 @@ def ask_claude(prompt, what):
 
 
 def identify_book(title):
-    # Greek/Italian/... titles are not in OpenLibrary, so Claude finds the original title
+    # Greek/Italian/... titles are not in OpenLibrary, so the model finds the original title
     prompt = (
         f'Identify the book with the title "{title}" (the title may be a Greek, Italian or other '
         "translation). Reply ONLY with JSON: "
         '{"original_title": "...", "author": "..."}. Use null for anything you are not sure about.'
     )
-    return ask_claude(prompt, "identify the book") or {}
+    return ask_llm(prompt, "identify the book") or {}
 
 
 # ---------- step 3: OpenLibrary ----------
@@ -208,7 +224,7 @@ def ask_user_fields(found):
     while row["status"] not in ("read", "to_read"):
         row["status"] = ask("Status must be read or to_read", "read").lower()
     row["house"] = ask("Publishing house (of your edition)")
-    row["pages"] = ask_int("Pages of your edition", 1, 10000, default=found.get("pages"))
+    row["pages"] = found.get("pages")             # not asked, taken from OpenLibrary as is
     if row["status"] == "read":
         row["times_read"] = ask_int("Times read", 1, 100, default=1)
         row["approximate_time_to_read_in_days"] = ask_int("Approximate days to read", 1, 1000)
@@ -222,14 +238,14 @@ def ask_user_fields(found):
     return row
 
 
-# ---------- step 5: answers from Claude ----------
+# ---------- step 5: answers from the model ----------
 
 def examples_from_csv(rows):
     keys = ["type", "form", "genre", "themes", "tone", "complexity"]
     return "\n".join(", ".join(f"{k}={r[k]}" for k in keys) for r in rows[-3:])
 
 
-def claude_fields(found, rows):
+def llm_fields(found, rows):
     prompt = (
         "You are filling the descriptive attributes of a book for a personal book recommender.\n"
         f"Title: {found['search_title']}\nAuthor: {found.get('author')}\n"
@@ -247,7 +263,7 @@ def claude_fields(found, rows):
         '  "year_published": year of the FIRST publication of the original book (integer)\n\n'
         f"Keep the same style as these existing rows:\n{examples_from_csv(rows)}"
     )
-    data = ask_claude(prompt, "describe the book") or {}
+    data = ask_llm(prompt, "describe the book") or {}
     out = {}
     out["type"] = data.get("type") if data.get("type") in TYPES else None
     out["form"] = data.get("form")
@@ -263,12 +279,12 @@ def claude_fields(found, rows):
     y = data.get("year_published")
     out["year_published"] = y if isinstance(y, int) else found.get("year_published")
     if found.get("year_published") and out["year_published"] != found["year_published"]:
-        print(f"  note: OpenLibrary says {found['year_published']}, Claude says {out['year_published']} (using Claude's)")
+        print(f"  note: OpenLibrary says {found['year_published']}, the model says {out['year_published']} (using the model's)")
     return out
 
 
-def review_claude_fields(fields):
-    print("\nClaude suggests:")
+def review_llm_fields(fields):
+    print("\nThe model suggests:")
     for k in AI_FIELDS:
         print(f"  {k}: {fields[k]}")
     if ask_yes_no("Accept", "y"):
@@ -322,7 +338,7 @@ def run_once(header, rows):
     # step 4
     user = ask_user_fields(found)
     # step 5
-    ai = review_claude_fields(claude_fields(found, rows))
+    ai = review_llm_fields(llm_fields(found, rows))
     # step 6
     row = {k: "" for k in header}
     row.update(id=next_id(rows), title=title, subtitle=found.get("subtitle"),
@@ -339,6 +355,7 @@ def run_once(header, rows):
 
 
 def main():
+    load_env()
     try:
         while True:
             with open(CSV_PATH, encoding="utf-8", newline="") as file:
