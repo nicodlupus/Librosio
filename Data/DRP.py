@@ -26,7 +26,9 @@ OL_SEARCH = "https://openlibrary.org/search.json"
 OL_BASE = "https://openlibrary.org"
 OL_HEADERS = {"User-Agent": "Librosio/1.0 (personal book recommender)"}
 OLLAMA_SEARCH_URL = "https://ollama.com/api/web_search"
-FALLBACK_MODELS = ["deepseek-v4-pro:0813", "kimi-k3"]     # tried when the first model does not know the book
+FALLBACK_MODELS = ["gemma4:31b", "nemotron-3-ultra"]     # free on the plan, tried when the first model does not know the book
+WARNED = set()
+WEB_BLOCKED = False
 TYPES = ["Fiction", "Non-Fiction"]
 LIST_FIELDS = ("themes", "tone", "authors_mentioned")
 
@@ -130,6 +132,9 @@ def ask_model(title, author, examples, model=None, web=None):
         try:
             r = requests.post(OLLAMA_URL, headers={"Authorization": f"Bearer {os.environ['API_KEY']}"},
                               json=body, timeout=90)
+            if r.status_code in (402, 403, 429):             # plan limits: retrying does not help
+                warn_once(f"({model}: {r.json().get('error', r.status_code)[:90]})")
+                return None
             r.raise_for_status()
             return json.loads(re.search(r"\{.*\}", r.json()["message"]["content"], re.DOTALL).group(0))
         except (requests.RequestException, KeyError, ValueError, AttributeError):
@@ -137,14 +142,41 @@ def ask_model(title, author, examples, model=None, web=None):
     return None
 
 
+def warn_once(message):
+    if message not in WARNED:
+        WARNED.add(message)
+        print("  " + message)
+
+
 def web_search(query):
-    """Web search through the Ollama API (same API_KEY). Returns a list of results or []."""
+    """Web search through the Ollama API (same API_KEY). Free plan has an hourly limit. Returns a list."""
+    global WEB_BLOCKED
+    if WEB_BLOCKED:
+        return []
     try:
         r = requests.post(OLLAMA_SEARCH_URL, headers={"Authorization": f"Bearer {os.environ['API_KEY']}"},
                           json={"query": query, "max_results": 4}, timeout=30)
+        if r.status_code == 429:
+            WEB_BLOCKED = True
+            print("  (web search: the free hourly limit is used up, skipping it until it resets)")
+            return []
         r.raise_for_status()
         return r.json().get("results", [])
     except (requests.RequestException, KeyError, ValueError):
+        return []
+
+
+def ol_context(title, author):
+    """OpenLibrary results as context for the model (same shape as web results). [] if down/nothing."""
+    try:
+        r = requests.get(OL_SEARCH, headers=OL_HEADERS, timeout=8, params={
+            "title": title, "author": author, "limit": 4, "fields": "title,author_name,first_publish_year,subject"})
+        r.raise_for_status()
+        return [{"title": f"{d.get('title')} by {', '.join(d.get('author_name', [])[:2])} "
+                          f"(first published {d.get('first_publish_year', '?')})",
+                 "content": "Subjects: " + ", ".join(d.get("subject", [])[:10])}
+                for d in r.json().get("docs", [])]
+    except (requests.RequestException, ValueError):
         return []
 
 
@@ -153,23 +185,31 @@ def recognised(answer):
 
 
 def try_ways(title, author, examples):
-    """Tries the ways one by one, telling the user. Returns (answer, source) or (None, None)."""
+    """Free and fast ways first, the limited web search last. Returns (answer, source) or (None, None)."""
     answer = ask_model(title, author, examples)
     if recognised(answer):
         return answer, "model"
-    print("  the model did not recognise the book, searching the web...")
-    web = web_search(f"{title} {author} βιβλίο") + web_search(f"{author} book")
-    if web:
-        answer = ask_model(title, author, examples, web=web)
-        if recognised(answer):
-            return answer, "web search + model"
-    else:
-        print("  (the web search gave nothing)")
-    for other in FALLBACK_MODELS:
-        print(f"  still not found, trying another model ({other})...")
-        answer = ask_model(title, author, examples, model=other, web=web)
+    for other in FALLBACK_MODELS[:1]:
+        print(f"  the model did not recognise the book, trying another model ({other})...")
+        answer = ask_model(title, author, examples, model=other)
         if recognised(answer):
             return answer, other
+    print("  still not found, checking OpenLibrary...")
+    context = ol_context(title, author)
+    if context:
+        answer = ask_model(title, author, examples, web=context)
+        if recognised(answer):
+            return answer, "OpenLibrary + model"
+    print("  still not found, searching the web...")
+    kind = "βιβλίο" if not title.isascii() else "book"
+    web = web_search(f"{title} {author} {kind}")
+    if web and not title.isascii():
+        web += web_search(f"{author} book")             # finds the author's own books (Greek -> original)
+    if web:
+        for model in (None, *FALLBACK_MODELS):
+            answer = ask_model(title, author, examples, model=model, web=web)
+            if recognised(answer):
+                return answer, "web search + " + (model or "model")
     return None, None
 
 
